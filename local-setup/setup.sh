@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Re-exec under bash if this was started by a non-bash shell (e.g. `sh setup_local_ai.sh`).
+# Without this, POSIX shells such as dash fail on the bash model array with:
+#   syntax error near unexpected token `('
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+
 # =============================================================================
 #  LOCAL AI WORKSTATION  —  fresh-Mac, re-runnable bootstrap (Apple Silicon / M5 Pro)
 # -----------------------------------------------------------------------------
@@ -40,7 +45,7 @@
 #    - Bash syntax validated; macOS-specific steps could not be executed by the author.
 #
 #  OFFICIAL SOURCES (verify before trusting — scam look-alikes exist):
-#    OpenClaw github.com/openclaw/openclaw | openclaw.ai      Peekaboo github.com/steipete/peekaboo
+#    OpenClaw github.com/openclaw/openclaw | openclaw.ai      Peekaboo peekaboo.sh | github.com/openclaw/Peekaboo
 #    Langfuse github.com/langfuse/langfuse                    SearXNG  github.com/searxng/searxng
 #    Portainer github.com/portainer/portainer                 Ollama   ollama.com (tags: /library)
 #    browser-use github.com/browser-use/browser-use           LiteLLM  github.com/BerriAI/litellm
@@ -600,8 +605,8 @@ TUT
 setup_peekaboo() {
   log "Peekaboo — macOS screenshot + GUI automation for agents (optional)"
   printf "Install Peekaboo? [y/N] "; read -r r; case "$r" in y|Y|yes) ;; *) ok "Skipped."; return ;; esac
-  brew install --cask peekaboo 2>/dev/null && ok "Peekaboo installed." \
-    || warn "Auto-install failed; see https://github.com/steipete/peekaboo for the current method."
+  brew install steipete/tap/peekaboo 2>/dev/null && ok "Peekaboo installed." \
+    || warn "Auto-install failed; install it manually:  brew install steipete/tap/peekaboo  (docs: https://peekaboo.sh)"
 }
 
 # =============================================================================
