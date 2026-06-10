@@ -110,7 +110,7 @@ validate_gemini()   { have curl || return 0; [ "$(curl -s -o /dev/null -w '%{htt
 # ----------------------------- generic secret prompt -------------------------
 # prompt_secret VARNAME "Title" validator_fn_or_empty "tutorial text"
 prompt_secret() {
-  local var="$1" title="$2" validator="$3" tutorial="$4"
+  local var="$1" title="$2" validator="$3" tut_fn="$4"
   local current; current="$(get_env "$var")"
   if [ -n "$current" ]; then
     if [ -z "$validator" ] || "$validator" "$current"; then
@@ -118,7 +118,7 @@ prompt_secret() {
     fi
     warn "$title is set but failed validation; let's re-enter it."
   fi
-  hr; printf "%s\n" "$tutorial"; hr
+  if [ -n "$tut_fn" ]; then hr; "$tut_fn"; hr; fi
   local tries=0 val=""
   while :; do
     printf "%sPaste %s and press Enter (or type 'skip'): %s" "$c_cyn" "$title" "$c_reset"
@@ -130,6 +130,43 @@ prompt_secret() {
     warn "That value didn't validate. Check it and try again."
   done
   set_env "$var" "$val"; ok "$title saved to .env"
+}
+
+tut_gemini() {
+cat <<TUT
+${c_cyn}#################  ACTION NEEDED: GOOGLE GEMINI FREE API KEY  #################${c_reset}
+   1. Open   https://aistudio.google.com/apikey
+   2. Sign in with a Google account.
+   3. Click  "Create API key"  (the free tier is rate-limited but free).
+   4. Copy the key (starts with AIza...).
+${c_cyn}#############################################################################${c_reset}
+TUT
+}
+tut_telegram() {
+cat <<TUT
+${c_cyn}#################  ACTION NEEDED: TELEGRAM BOT TOKEN  #################${c_reset}
+   1. Open Telegram and search for the user  @BotFather  (the official one, blue check).
+   2. Send  /newbot
+   3. Give it a display name (e.g. "My Local AI").
+   4. Give it a username ending in 'bot' (e.g. my_local_ai_bot).
+   5. BotFather replies with a token like  123456789:ABCdEf...  - copy that whole token.
+   (After setup, you'll DM this bot to talk to your agent.)
+${c_cyn}#####################################################################${c_reset}
+TUT
+}
+tut_discord() {
+cat <<TUT
+${c_cyn}#################  ACTION NEEDED: DISCORD BOT TOKEN  #################${c_reset}
+   1. Open  https://discord.com/developers/applications  and log in.
+   2. "New Application" -> name it -> Create.
+   3. Left menu -> "Bot" -> "Reset Token" -> "Yes, do it!" -> "Copy" the token.
+   4. On the same Bot page, enable  "MESSAGE CONTENT INTENT"  (toggle ON) and Save.
+   5. Left menu -> "OAuth2" -> "URL Generator": tick scope 'bot', tick perms
+      'Send Messages' + 'Read Message History', copy the generated URL, open it,
+      and invite the bot to YOUR server.
+   (Optional - type 'skip' if you only want Telegram.)
+${c_cyn}#####################################################################${c_reset}
+TUT
 }
 
 press_enter() { printf "\n%sPress Enter when you're ready to continue...%s" "$c_yel" "$c_reset"; read -r _; }
@@ -359,15 +396,7 @@ setup_cloud_model_optional() {
   if [ -n "$(get_env GEMINI_API_KEY)" ]; then ok "Cloud (Gemini) key already set."; return; fi
   printf "Add an optional free cloud model (Google Gemini free tier) for hard tasks? [y/N] "
   read -r r; case "$r" in y|Y|yes) ;; *) ok "Skipping cloud model (staying fully local)."; return ;; esac
-  prompt_secret GEMINI_API_KEY "Google Gemini API key" validate_gemini "$(cat <<TUT
-${c_cyn}#################  ACTION NEEDED: GOOGLE GEMINI FREE API KEY  #################${c_reset}
-   1. Open   https://aistudio.google.com/apikey
-   2. Sign in with a Google account.
-   3. Click  "Create API key"  (the free tier is rate-limited but free).
-   4. Copy the key (starts with AIza...).
-${c_cyn}#############################################################################${c_reset}
-TUT
-)"
+  prompt_secret GEMINI_API_KEY "Google Gemini API key" validate_gemini tut_gemini
 }
 
 setup_litellm() {
@@ -541,30 +570,8 @@ setup_services() {
 # =============================================================================
 collect_chat_tokens() {
   log "Messaging tokens for your main agent"
-  prompt_secret TELEGRAM_BOT_TOKEN "Telegram bot token" validate_telegram "$(cat <<TUT
-${c_cyn}#################  ACTION NEEDED: TELEGRAM BOT TOKEN  #################${c_reset}
-   1. Open Telegram and search for the user  @BotFather  (the official one, blue check).
-   2. Send  /newbot
-   3. Give it a display name (e.g. "My Local AI").
-   4. Give it a username ending in 'bot' (e.g. my_local_ai_bot).
-   5. BotFather replies with a token like  123456789:ABCdEf...  — copy that whole token.
-   (After setup, you'll DM this bot to talk to your agent.)
-${c_cyn}#####################################################################${c_reset}
-TUT
-)"
-  prompt_secret DISCORD_BOT_TOKEN "Discord bot token" validate_discord "$(cat <<TUT
-${c_cyn}#################  ACTION NEEDED: DISCORD BOT TOKEN  #################${c_reset}
-   1. Open  https://discord.com/developers/applications  and log in.
-   2. "New Application" -> name it -> Create.
-   3. Left menu -> "Bot" -> "Reset Token" -> "Yes, do it!" -> "Copy" the token.
-   4. On the same Bot page, enable  "MESSAGE CONTENT INTENT"  (toggle ON) and Save.
-   5. Left menu -> "OAuth2" -> "URL Generator": tick scope 'bot', tick perms
-      'Send Messages' + 'Read Message History', copy the generated URL, open it,
-      and invite the bot to YOUR server.
-   (Optional — type 'skip' if you only want Telegram.)
-${c_cyn}#####################################################################${c_reset}
-TUT
-)"
+  prompt_secret TELEGRAM_BOT_TOKEN "Telegram bot token" validate_telegram tut_telegram
+  prompt_secret DISCORD_BOT_TOKEN "Discord bot token" validate_discord tut_discord
 }
 
 openclaw_healthy() { have openclaw && openclaw --version >/dev/null 2>&1; }
