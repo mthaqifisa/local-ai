@@ -72,25 +72,31 @@ PORT_OLLAMA=11434; PORT_OPENWEBUI=3001; PORT_LANGFUSE=3000
 PORT_SEARXNG=8888; PORT_GATEWAY=4000;  PORT_DASHBOARD=8800
 
 # Models — ACCURACY-FIRST selection for an M5 Pro / 64GB (speed is secondary; you said
-# you can wait). These are the most accurate FREE local models that FIT in 64GB unified
-# memory as of mid-2026. Bigger frontier models (DeepSeek V4 Pro, MiniMax M3, full GLM-5.1)
-# do NOT fit on 64GB and are intentionally excluded. EDIT tags at https://ollama.com/library.
+# you can wait). These are the most accurate FREE local models that ACTUALLY FIT in 64GB
+# unified memory, leaving room for macOS + Docker. EDIT tags at https://ollama.com/library.
 #
-# Note on memory: with OLLAMA_MAX_LOADED_MODELS=1 only one heavy model is resident at a
-# time, so the big MoE coexists with the others — they swap in on demand.
+# WHY NOT Kimi K2.6 or Qwen3.5-122B? They do NOT fit 64GB and are intentionally excluded:
+#   - Kimi K2.6 is a 1T-parameter MoE; even its smallest Q2 quant needs ~350GB RAM (all
+#     experts must sit in memory). It needs a server, not a laptop.
+#   - Qwen3.5 122B-A10B is ~74-81GB at Q4 — over your 64GB once the OS/Docker take their cut.
+# The picks below are the accuracy ceiling that runs well on 64GB.
 MODELS=(
-  # --- top accuracy tier (large; slower but best answers) ---
-  "qwen3.5:122b-a10b|MAX-ACCURACY reasoning/orchestrator MoE (122B/10B active); beats GPT-5-mini on many benchmarks, fits 64GB"
-  "kimi-k2.6|MAX-ACCURACY coder (leads open-source SWE-Bench; needs quantization, large)"
-  # --- strong, lighter fallbacks (used when you want a faster turn) ---
-  "qwen3.6:27b|best DENSE coder (no MoE overhead; ~77% SWE-bench) — reliable everyday coding"
-  "devstral:24b|agentic coding: multi-file edits, tool calls, test-fix loops"
+  # --- reasoning / orchestrator brain ---
+  "qwen3.5:35b-a3b|MAX-ACCURACY reasoning that fits 64GB (MoE 35B/3B active, ~22GB); near-frontier quality"
+  # --- coding (accuracy-first) ---
+  "qwen3.6:27b|PRIMARY coder: best DENSE model (77.2% SWE-bench, ~22GB at Q6) — most accurate coder that fits"
+  "qwen3-coder-next|dedicated agentic coding (80B MoE, ~46GB); fits 64GB for code-only sessions"
+  "devstral:24b|agentic coding: multi-file edits, tool calls, test-fix loops (~16GB)"
   "codestral:22b|fast FIM autocomplete for the IDE"
+  # --- support models ---
   "qwen2.5vl:7b|vision: reads screenshots so the agent can 'see' the UI"
   "nomic-embed-text|embeddings for memory / RAG / web-search reranking"
 )
-# These large models total well over 100GB of downloads. Comment out the top tier if you
-# want a faster first setup, or any line you don't need — failed/oversized pulls just skip.
+# Memory note: with OLLAMA_MAX_LOADED_MODELS=1 only one heavy model is resident at a time,
+# so these don't all load at once — Ollama swaps them in on demand. Even so, don't run the
+# 46GB coder-next at the same time as Docker-heavy services. Comment out any line you don't
+# need; failed/oversized pulls just skip. For the BEST accuracy that fits, lead with
+# qwen3.6:27b (coding) and qwen3.5:35b-a3b (reasoning).
 
 # ----------------------------- PRETTY LOGGING --------------------------------
 c_reset=$'\033[0m'; c_blue=$'\033[1;34m'; c_grn=$'\033[1;32m'; c_yel=$'\033[1;33m'; c_red=$'\033[1;31m'; c_cyn=$'\033[1;36m'
@@ -312,17 +318,40 @@ setup_ollama() {
 }
 
 # =============================================================================
-#  PHASE 2 — PYTHON ENV + AIDER (terminal coding with LOCAL models)
+#  PHASE 2 — PYTHON ENVS  (gateway venv + isolated Aider)
+#  WHY TWO ENVS: Aider hard-pins an EXACT litellm version, while the LiteLLM proxy needs
+#  a current litellm. In one venv they conflict and the gateway's litellm ends up broken
+#  (this was the cause of the gateway being down). The fix:
+#    - Gateway + dashboard  -> dedicated $WORKDIR/.venv  (litellm[proxy] + flask; NO aider)
+#    - Aider                -> ISOLATED via `uv tool install` (its own env + its own pin)
 # =============================================================================
-PY_PKGS='aider-chat "litellm[proxy]" openai langfuse python-dotenv flask requests rich'
-venv_ok() { [ -x "$WORKDIR/.venv/bin/python" ] && "$WORKDIR/.venv/bin/python" -c "import litellm, flask, requests" >/dev/null 2>&1; }
+# Gateway/dashboard packages — deliberately NO aider here so nothing pins litellm.
+GW_PKGS='"litellm[proxy]" openai langfuse python-dotenv flask requests rich'
+venv_ok() { [ -x "$WORKDIR/.venv/bin/python" ] && [ -x "$WORKDIR/.venv/bin/litellm" ] \
+            && "$WORKDIR/.venv/bin/python" -c "import litellm, flask, requests" >/dev/null 2>&1; }
 setup_python() {
-  log "Python venv + Aider (AI pair-programmer in the terminal)"
-  if venv_ok; then ok "venv healthy."; return; fi
-  [ -d "$WORKDIR/.venv" ] && { warn "venv incomplete — rebuilding."; rm -rf "$WORKDIR/.venv"; }
-  ( cd "$WORKDIR" && opt uv venv --python 3.12 .venv \
-      && opt uv pip install --python "$WORKDIR/.venv/bin/python" $PY_PKGS )
-  venv_ok && ok "Python env + Aider ready" || warn "venv setup incomplete; re-run to retry."
+  log "Gateway/dashboard Python env (litellm proxy + flask; Aider kept separate)"
+  if venv_ok; then ok "Gateway venv healthy."
+  else
+    [ -d "$WORKDIR/.venv" ] && { warn "venv incomplete — rebuilding."; rm -rf "$WORKDIR/.venv"; }
+    ( cd "$WORKDIR" && opt uv venv --python 3.12 .venv \
+        && opt uv pip install --python "$WORKDIR/.venv/bin/python" $GW_PKGS )
+    venv_ok && ok "Gateway venv ready (litellm proxy + flask)." \
+            || warn "Gateway venv incomplete; re-run to retry (this is what the gateway needs)."
+  fi
+
+  log "Aider — isolated install via uv tool (its pinned litellm stays out of the gateway)"
+  if have aider || [ -x "$HOME/.local/bin/aider" ]; then ok "Aider already installed."
+  else
+    # Official isolated method: aider gets its own python 3.12 and its own litellm pin.
+    opt uv tool install --force --python python3.12 --with pip aider-chat@latest
+    ( have aider || [ -x "$HOME/.local/bin/aider" ] ) && ok "Aider installed (isolated)." \
+      || warn "Aider install incomplete; retry later: uv tool install aider-chat@latest"
+  fi
+  # Make sure uv tool's bin dir is on PATH for future shells.
+  if ! grep -q '.local/bin' "$HOME/.zprofile" 2>/dev/null; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zprofile"
+  fi
 }
 
 # =============================================================================
@@ -427,42 +456,57 @@ setup_cloud_optional() {
 setup_litellm() {
   log "LiteLLM gateway (:$PORT_GATEWAY) — friendly model names; logs to Langfuse"
   load_env
-  cat > "$WORKDIR/litellm.config.yaml" <<'YAMLEOF'
+  local CFG="$WORKDIR/litellm.config.yaml"
+  # PRESERVE a hand-edited config. The script only writes a default if none exists,
+  # so re-runs never clobber your custom litellm.config.yaml.
+  if [ -f "$CFG" ]; then
+    ok "Existing litellm.config.yaml found — keeping it as-is (not overwritten)."
+    # Helpful nudge: Langfuse logging powers the dashboard's "recent activity" panel.
+    if ! grep -q 'success_callback' "$CFG"; then
+      warn "Your config has no Langfuse callback; the dashboard activity panel will stay empty."
+      warn "To enable it, add at the end of $CFG:"
+      printf '       litellm_settings:\n         success_callback: ["langfuse"]\n         failure_callback: ["langfuse"]\n'
+    fi
+  else
+    warn "No litellm.config.yaml in $WORKDIR — writing a default (your alias names)."
+    cat > "$CFG" <<'YAMLEOF'
 model_list:
-  # Accuracy-first aliases. "coder" and "orchestrator" map to the most accurate models
-  # that fit in 64GB; the *-fast aliases are the lighter, quicker fallbacks.
-  - model_name: coder
-    litellm_params: { model: ollama/kimi-k2.6,        api_base: http://localhost:11434 }
-  - model_name: coder-fast
-    litellm_params: { model: ollama/qwen3.6:27b,      api_base: http://localhost:11434 }
-  - model_name: orchestrator
-    litellm_params: { model: ollama/qwen3.5:122b-a10b, api_base: http://localhost:11434 }
-  - model_name: agentic-coder
-    litellm_params: { model: ollama/devstral:24b,     api_base: http://localhost:11434 }
-  - model_name: autocomplete
-    litellm_params: { model: ollama/codestral:22b,    api_base: http://localhost:11434 }
-  - model_name: vision
-    litellm_params: { model: ollama/qwen2.5vl:7b,     api_base: http://localhost:11434 }
+  # Accuracy-first, sized to fit 64GB. Names match the user's chosen aliases.
+  - model_name: qwen3.5
+    litellm_params: { model: ollama/qwen3.5:35b-a3b,   api_base: http://127.0.0.1:11434 }
+  - model_name: qwen3.6-coder
+    litellm_params: { model: ollama/qwen3.6:27b,       api_base: http://127.0.0.1:11434 }
+  - model_name: qwen3-coder-next
+    litellm_params: { model: ollama/qwen3-coder-next,  api_base: http://127.0.0.1:11434 }
+  - model_name: devstral
+    litellm_params: { model: ollama/devstral:24b,      api_base: http://127.0.0.1:11434 }
+  - model_name: codestral
+    litellm_params: { model: ollama/codestral:22b,     api_base: http://127.0.0.1:11434 }
+  - model_name: qwen2.5vl
+    litellm_params: { model: ollama/qwen2.5vl:7b,      api_base: http://127.0.0.1:11434 }
+  - model_name: nomic-embed-text
+    litellm_params: { model: ollama/nomic-embed-text,  api_base: http://127.0.0.1:11434 }
 litellm_settings:
   success_callback: ["langfuse"]
   failure_callback: ["langfuse"]
   drop_params: true
   request_timeout: 1200   # accuracy-first: allow long generations from big models
 YAMLEOF
-  if [ -n "$(get_env GEMINI_API_KEY)" ]; then
-    cat >> "$WORKDIR/litellm.config.yaml" <<'YAMLEOF'
-  # BACKUP ONLY — never the default. Call model alias "cloud" explicitly to use it.
-  - model_name: cloud
-    litellm_params: { model: gemini/gemini-2.5-flash }
-YAMLEOF
+    ok "Default litellm.config.yaml written."
   fi
-  cat > "$WORKDIR/start_gateway.sh" <<'SHEOF'
+  cat > "$WORKDIR/start_gateway.sh" <<SHEOF
 #!/usr/bin/env bash
-cd "$(dirname "$0")" || exit 1
-set -a; [ -f .env ] && . ./.env; set +a
-exec "./.venv/bin/litellm" --config litellm.config.yaml --port 4000 --host 127.0.0.1
+# Launched by launchd, so use ABSOLUTE paths (no reliance on cwd or login PATH).
+set -a; [ -f "$WORKDIR/.env" ] && . "$WORKDIR/.env"; set +a
+LITELLM="$WORKDIR/.venv/bin/litellm"
+CONFIG="$WORKDIR/litellm.config.yaml"
+if [ ! -x "\$LITELLM" ]; then
+  echo "ERROR: \$LITELLM not found. Run setup_python (the gateway venv is missing)." >&2
+  exit 1
+fi
+exec "\$LITELLM" --config "\$CONFIG" --port $PORT_GATEWAY --host 127.0.0.1
 SHEOF
-  chmod +x "$WORKDIR/start_gateway.sh"; ok "Gateway configured."
+  chmod +x "$WORKDIR/start_gateway.sh"; ok "Gateway launcher written (absolute paths)."
 }
 
 # =============================================================================
@@ -482,13 +526,13 @@ setup_continue() {
 name: Local AI
 version: 1.0.0
 models:
-  - name: Coder (Kimi K2.6 — max accuracy)
-    provider: ollama
-    model: kimi-k2.6
-    roles: [chat, edit, apply]
-  - name: Coder fast (Qwen 3.6 27B)
+  - name: Coder (Qwen 3.6 27B — most accurate that fits 64GB)
     provider: ollama
     model: qwen3.6:27b
+    roles: [chat, edit, apply]
+  - name: Coder Next (Qwen3-Coder-Next — heavy, code-only)
+    provider: ollama
+    model: qwen3-coder-next
     roles: [chat, edit, apply]
   - name: Autocomplete (Codestral)
     provider: ollama
@@ -521,7 +565,7 @@ LF = os.environ.get("LANGFUSE_HOST", "http://localhost:3000")
 PK = os.environ.get("LANGFUSE_PUBLIC_KEY", ""); SK = os.environ.get("LANGFUSE_SECRET_KEY", "")
 SERVICES = [
     ("Ollama (models)",     "http://localhost:11434/api/tags",         "http://localhost:11434"),
-    ("LiteLLM (gateway)",   "http://localhost:4000/health",            "http://localhost:4000"),
+    ("LiteLLM (gateway)",   "http://localhost:4000/health/liveliness",            "http://localhost:4000"),
     ("Open WebUI (chat)",   "http://localhost:3001/",                  "http://localhost:3001"),
     ("SearXNG (web search)","http://localhost:8888/",                  "http://localhost:8888"),
     ("Langfuse (traces)",   "http://localhost:3000/api/public/health", "http://localhost:3000"),
@@ -589,7 +633,9 @@ PYEOF
 #  PHASE 7 — ALWAYS-ON SERVICES (launchd)
 # =============================================================================
 install_launch_agent() {
-  local label="$1" prog="$2" plist="$LAUNCH_DIR/$label.plist"
+  local label="${1:-}" prog="${2:-}" plist
+  if [ -z "$label" ] || [ -z "$prog" ]; then warn "install_launch_agent: missing label/program — skipping."; return; fi
+  plist="$LAUNCH_DIR/$label.plist"
   mkdir -p "$LAUNCH_DIR"; launchctl unload "$plist" >/dev/null 2>&1 || true
   cat > "$plist" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -641,7 +687,7 @@ ${c_cyn}#############  FINISH OPENCLAW (interactive)  #############${c_reset}
  Run the official onboarding (the script can launch it for you below):
      ${c_grn}openclaw onboard --install-daemon${c_reset}
  In onboarding:
-   - Provider: ollama   Model: qwen3.5:122b-a10b   Endpoint: http://localhost:$PORT_OLLAMA
+   - Provider: ollama   Model: qwen3.5:35b-a3b   Endpoint: http://localhost:$PORT_OLLAMA
    - Channel: Telegram -> paste TELEGRAM_BOT_TOKEN from $WORKDIR/.env
    - For Mac control, macOS will prompt for permissions. Grant ONLY what you want:
        System Settings > Privacy & Security > Accessibility   (enable OpenClaw)
@@ -692,14 +738,15 @@ over Telegram. You plan, delegate to sub-agents, control the Mac when needed, an
   screenshot after each step and stop if the screen isn't what you expected.
 
 ## Sub-agents (call by model alias on the gateway at http://localhost:4000)
-- coder         : qwen3-coder — writes web apps, scripts, services
-- agentic-coder : devstral    — multi-file edits, runs tests, tool calls
-- vision        : reads screenshots to locate UI elements before clicking
-- orchestrator  : qwen3       — planning / routing
+- qwen3.6-coder    : qwen3.6:27b — writes web apps, scripts, services (primary coder)
+- qwen3-coder-next : heavy agentic coding; multi-file, repo-level (run alone, ~46GB)
+- devstral         : multi-file edits, runs tests, tool calls
+- qwen2.5vl        : reads screenshots to locate UI elements before clicking
+- qwen3.5          : planning / routing (orchestrator brain)
 
 ## Style: concise. State assumptions. Surface risks. Ask one question only when blocked.
-## Accuracy over speed: prefer the most accurate model (alias "coder" / "orchestrator")
-## even if slower. Use the "-fast" aliases only when the user explicitly asks for speed.
+## Accuracy over speed: prefer the most accurate model (qwen3.6-coder for code,
+## qwen3.5 for reasoning) even if slower.
 MDEOF
   cat > "$A/websearch.py" <<'PYEOF'
 #!/usr/bin/env python3
@@ -738,7 +785,7 @@ Everything lives in \`$WORKDIR\`. Secrets in \`.env\` (chmod 600).
 - Ollama         http://localhost:$PORT_OLLAMA      (model server)
 
 ## Build code (goal 1)
-- Terminal:  \`cd <project> && $WORKDIR/.venv/bin/aider --model ollama/kimi-k2.6\`
+- Terminal:  \`cd <project> && aider --model ollama/qwen3.6:27b\`
 - VS Code:   open the Continue panel; it uses your local models.
 - Antigravity: open the app (free Gemini 3 preview) for autonomous multi-file agents.
 - Copilot CLI: run \`copilot\` in a repo, then \`/login\` (free tier has limited credits).
@@ -783,7 +830,7 @@ svc_status() {
   brew_env; log "Service status"
   svc_row "Docker engine (Colima)"        "$(state docker_up)"
   svc_row "Ollama        :$PORT_OLLAMA"    "$(state http_ok "http://localhost:$PORT_OLLAMA/api/tags")"
-  svc_row "LiteLLM gw    :$PORT_GATEWAY"    "$(state http_ok "http://localhost:$PORT_GATEWAY/health")"
+  svc_row "LiteLLM gw    :$PORT_GATEWAY"    "$(state http_ok "http://localhost:$PORT_GATEWAY/health/liveliness")"
   svc_row "Open WebUI    :$PORT_OPENWEBUI"  "$(state http_ok "http://localhost:$PORT_OPENWEBUI/")"
   svc_row "SearXNG       :$PORT_SEARXNG"    "$(state searxng_ok)"
   svc_row "Langfuse      :$PORT_LANGFUSE"   "$(state langfuse_ok)"
@@ -858,7 +905,7 @@ ${c_cyn}-------------------------------------------------------------------
  AI engine (LOCAL — your primary brain)
    • Ollama + models: $(ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' | paste -sd, - 2>/dev/null)
  Local coding tools
-   • Aider (terminal pair-programmer, in $WORKDIR/.venv)
+   • Aider (terminal pair-programmer, isolated via uv tool — run 'aider')
    • Continue (VS Code extension, config at ~/.continue/config.yaml)
  Backup / cloud coding tools (used only when you choose them)
    • VS Code, LM Studio (GUI)
@@ -873,8 +920,8 @@ ${c_cyn}-------------------------------------------------------------------
 ${c_cyn}-------------------------------------------------------------------
  2) WHAT WAS CONFIGURED
 -------------------------------------------------------------------${c_reset}
-   • LiteLLM gateway → friendly local model names (coder, agentic-coder, autocomplete,
-     orchestrator, vision); logs every call to Langfuse.   Cloud backup: $gems
+   • LiteLLM gateway → model aliases (qwen3.5, qwen3.6-coder, qwen3-coder-next,
+     devstral, codestral, qwen2.5vl); logs every call to Langfuse.   Cloud backup: $gems
    • Ollama capped at $OLLAMA_MAX_LOADED loaded model(s) to protect unified memory.
    • Continue + Aider pointed at local models (no data leaves the Mac).
    • Open WebUI pointed at Ollama (enable Web Search in its Settings to use SearXNG).
@@ -889,7 +936,7 @@ ${c_cyn}-------------------------------------------------------------------
    Open WebUI       http://localhost:$PORT_OPENWEBUI    [$(up http_ok "http://localhost:$PORT_OPENWEBUI/")]   chat with web search
    Langfuse         http://localhost:$PORT_LANGFUSE    [$(up langfuse_ok)]   agent traces / logs
    SearXNG          http://localhost:$PORT_SEARXNG    [$(up searxng_ok)]   private web search
-   LiteLLM gateway  http://localhost:$PORT_GATEWAY    [$(up http_ok "http://localhost:$PORT_GATEWAY/health")]   model routing
+   LiteLLM gateway  http://localhost:$PORT_GATEWAY    [$(up http_ok "http://localhost:$PORT_GATEWAY/health/liveliness")]   model routing
    Ollama           http://localhost:$PORT_OLLAMA   [$(up http_ok "http://localhost:$PORT_OLLAMA/api/tags")]   local models
 
 ${c_cyn}-------------------------------------------------------------------
@@ -897,10 +944,10 @@ ${c_cyn}-------------------------------------------------------------------
 -------------------------------------------------------------------${c_reset}
    1. Open the dashboard:  http://localhost:$PORT_DASHBOARD
    2. Open WebUI → Settings → enable Web Search → point at SearXNG (goal: fresh answers).
-   3. If you skipped it:  openclaw onboard --install-daemon  (provider ollama, model qwen3.5:122b-a10b).
+   3. If you skipped it:  openclaw onboard --install-daemon  (provider ollama, model qwen3.5:35b-a3b).
    4. For Mac/GUI control: System Settings → Privacy & Security → grant OpenClaw/Peekaboo
       Accessibility + Screen Recording (macOS-protected; can't be scripted).
-   5. Code now:  cd <repo> && $WORKDIR/.venv/bin/aider --model ollama/kimi-k2.6
+   5. Code now:  cd <repo> && aider --model ollama/qwen3.6:27b
    6. DM your Telegram bot:  "web-search today's date and tell me, to prove search works."
 
 ${c_cyn}-------------------------------------------------------------------
